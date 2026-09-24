@@ -39,6 +39,7 @@ export function CreateGiftForm() {
 
   // Step 1 → Step 2: fetch USDC estimate then show preview
   const onFormSubmit = async (data: CreateGiftInput) => {
+    setLoading(true);
     setError(null);
     try {
       // Check if recipient is registered (GET — no CSRF needed)
@@ -50,6 +51,7 @@ export function CreateGiftForm() {
         setRecipientRegistered(checkJson.data?.exists ?? false);
         if (!checkJson.data?.exists) {
           setShowUnregisteredWarning(true);
+          setLoading(false);
           return; // Don't proceed to preview yet
         }
       } else {
@@ -67,6 +69,7 @@ export function CreateGiftForm() {
       // non-critical — preview still shows without USDC estimate
     }
     setStep("preview");
+    setLoading(false);
   };
 
   const onProceedUnregistered = async () => {
@@ -188,7 +191,7 @@ export function CreateGiftForm() {
           {...register("message")}
         />
 
-        <Button type="submit" fullWidth>
+        <Button type="submit" fullWidth loading={loading}>
           Preview Gift →
         </Button>
       </form>
