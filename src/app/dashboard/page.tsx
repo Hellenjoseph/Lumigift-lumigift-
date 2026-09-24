@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { GiftCard } from "@/components/gift/GiftCard";
+import { GiftCardSkeleton } from "@/components/gift/GiftCardSkeleton";
 import styles from "./page.module.css";
 import type { ApiResponse } from "@/types";
 import type { GiftPageOffset } from "@/server/services/gift.service";
@@ -20,26 +21,42 @@ async function fetchGifts(page: number, limit: number): Promise<GiftPageOffset> 
 export default function DashboardPage() {
   const [page, setPage] = useState(1);
 
-  const { data, status } = useQuery({
+  const { data, status, isFetching, isStale, refetch } = useQuery({
     queryKey: ["gifts", page],
     queryFn: () => fetchGifts(page, DEFAULT_LIMIT),
   });
 
+  // ── Loading (initial fetch) ──────────────────────────────────────────────
   if (status === "pending") {
     return (
       <div className={styles.page}>
         <div className="container">
-          <p>Loading gifts…</p>
+          <h1 className={styles.title}>Your Gifts</h1>
+          {/* Accessible live region so screen readers announce loading */}
+          <div className={styles.grid} aria-live="polite" aria-busy="true">
+            <GiftCardSkeleton count={DEFAULT_LIMIT} />
+          </div>
         </div>
       </div>
     );
   }
 
+  // ── Error / failed fetch ─────────────────────────────────────────────────
   if (status === "error") {
     return (
       <div className={styles.page}>
         <div className="container">
-          <p>Failed to load gifts. Please try again.</p>
+          <h1 className={styles.title}>Your Gifts</h1>
+          <div className={styles.errorState} role="alert">
+            <p className={styles.errorMessage}>Failed to load your gifts. Please try again.</p>
+            <button
+              className="btn btn--secondary"
+              onClick={() => refetch()}
+              aria-label="Retry loading gifts"
+            >
+              Retry
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -52,9 +69,17 @@ export default function DashboardPage() {
       <div className="container">
         <h1 className={styles.title}>Your Gifts</h1>
 
+        {/* Stale banner — shown when cached data is being refreshed in background */}
+        {isStale && isFetching && (
+          <p className={styles.staleBanner} aria-live="polite" aria-atomic="true">
+            Refreshing…
+          </p>
+        )}
+
         {gifts.length === 0 ? (
-          <div className={styles.empty}>
-            <div className={styles.emptyIconWrapper}>
+          // ── Empty state ───────────────────────────────────────────────────
+          <div className={styles.empty} role="status" aria-label="No gifts found">
+            <div className={styles.emptyIconWrapper} aria-hidden="true">
               <svg
                 xmlns="http://www.w3.org/2000/svg"
                 width="40"
@@ -86,28 +111,35 @@ export default function DashboardPage() {
               Showing {(page - 1) * DEFAULT_LIMIT + 1}–{Math.min(page * DEFAULT_LIMIT, total)} of{" "}
               {total} gifts
             </p>
-            <div className={styles.grid}>
-              {gifts.map((gift) => (
-                <GiftCard key={gift.id} gift={gift} perspective="sender" />
-              ))}
+
+            {/* Skeleton overlay while paginating (keeps layout stable) */}
+            <div className={styles.grid} aria-live="polite" aria-busy={isFetching}>
+              {isFetching ? (
+                <GiftCardSkeleton count={DEFAULT_LIMIT} />
+              ) : (
+                gifts.map((gift) => <GiftCard key={gift.id} gift={gift} perspective="sender" />)
+              )}
             </div>
-            <div className={styles.loadMore}>
+
+            <div className={styles.pagination}>
               <button
                 className="btn btn--secondary"
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page === 1}
+                disabled={page === 1 || isFetching}
+                aria-label="Previous page"
               >
-                Previous
+                ← Previous
               </button>
-              <span>
+              <span aria-live="polite" aria-atomic="true">
                 Page {page} of {totalPages}
               </span>
               <button
                 className="btn btn--secondary"
                 onClick={() => setPage((p) => p + 1)}
-                disabled={page >= totalPages}
+                disabled={page >= totalPages || isFetching}
+                aria-label="Next page"
               >
-                Next
+                Next →
               </button>
             </div>
           </>
