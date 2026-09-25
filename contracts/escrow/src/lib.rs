@@ -89,6 +89,28 @@ const MIN_TTL_THRESHOLD: u32 = 120_960; // 7 * 24 * 3600 / 5
 /// reconciliation after the funds have been transferred.
 const POST_CLAIM_TTL_LEDGERS: u32 = 120_960;
 
+// ─── EscrowStatus enum ────────────────────────────────────────────────────────
+
+/// Explicit lifecycle status for the escrow.
+///
+/// Returned by `get_status` so that off-chain indexers and the backend can
+/// reconcile state without having to infer it from multiple boolean flags.
+///
+/// Terminal states (`Claimed`, `Cancelled`) must never transition back to
+/// a non-terminal state — the contract enforces this invariant.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EscrowStatus {
+    /// Funds are locked; the unlock time has not been reached.
+    Locked = 0,
+    /// The unlock time has passed but the recipient has not yet claimed.
+    Unlocked = 1,
+    /// The recipient successfully claimed the funds (terminal).
+    Claimed = 2,
+    /// The sender cancelled the escrow and funds were returned (terminal).
+    Cancelled = 3,
+}
+
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 //
 // All keys use `instance` storage, which is tied to the contract instance
@@ -117,6 +139,9 @@ const POST_CLAIM_TTL_LEDGERS: u32 = 120_960;
 //                                                                       │
 //                                                                       ▼
 //                                                                  [Claimed]
+//
+//   [Locked] ──cancel()──► [Cancelled]
+//   [Unlocked] ──cancel()──► [Cancelled]
 
 #[contracttype]
 pub enum DataKey {
@@ -344,6 +369,9 @@ impl EscrowContract {
     }
 
     /// Read-only: returns (recipient, amount, unlock_time, claimed).
+    ///
+    /// The `claimed` bool is kept for backwards compatibility.
+    /// Prefer `get_status` for explicit lifecycle state.
     pub fn get_state(env: Env) -> Result<(Address, i128, u64, bool), EscrowError> {
         let recipient: Address = env
             .storage()
@@ -367,6 +395,58 @@ impl EscrowContract {
             .unwrap_or(false);
 
         Ok((recipient, amount, unlock_time, claimed))
+    }
+
+    /// Read-only: returns the explicit `EscrowStatus` for this escrow.
+    ///
+    /// Unlike `get_state`, this method expresses the full lifecycle as a
+    /// single enum value so the backend can reconcile without guessing:
+    ///
+    /// - `Locked`    — initialized, unlock time not yet reached
+    /// - `Unlocked`  — unlock time reached, recipient has not yet claimed
+    /// - `Claimed`   — funds transferred to recipient (terminal)
+    /// - `Cancelled` — sender cancelled and funds returned (terminal)
+    ///
+    /// Terminal states (`Claimed`, `Cancelled`) cannot contradict each other
+    /// because the contract writes them atomically and checks each terminal
+    /// flag before allowing any state transition.
+    pub fn get_status(env: Env) -> Result<EscrowStatus, EscrowError> {
+        // Require the contract to be initialized
+        if !env.storage().instance().has(&DataKey::Sender) {
+            return Err(EscrowError::NotInitialized);
+        }
+
+        let claimed: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Claimed)
+            .unwrap_or(false);
+
+        if claimed {
+            return Ok(EscrowStatus::Claimed);
+        }
+
+        let cancelled: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Cancelled)
+            .unwrap_or(false);
+
+        if cancelled {
+            return Ok(EscrowStatus::Cancelled);
+        }
+
+        let unlock_time: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UnlockTime)
+            .ok_or(EscrowError::NotInitialized)?;
+
+        if env.ledger().timestamp() < unlock_time {
+            Ok(EscrowStatus::Locked)
+        } else {
+            Ok(EscrowStatus::Unlocked)
+        }
     }
 
     /// Upgrade the contract WASM. Restricted to the admin address stored at initialization.
