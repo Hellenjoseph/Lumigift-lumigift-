@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { queryAuditLogs, AuditEventType } from "@/server/services/audit.service";
 import { withErrorHandler } from "@/server/middleware";
+import { requireAdmin } from "@/server/middleware/admin";
+import { parseAuditLogQuery } from "./query";
 import type { ApiResponse } from "@/types";
 
 interface AuditLogQueryResponse {
@@ -21,63 +21,21 @@ interface AuditLogQueryResponse {
   total: number;
 }
 
+function invalidQuery(error: string) {
+  return NextResponse.json<ApiResponse<never>>(
+    { success: false, error, code: "INVALID_QUERY" },
+    { status: 400 }
+  );
+}
+
 export const GET = withErrorHandler(async (req: NextRequest) => {
-  const session = await getServerSession(authOptions);
-  if (!session?.user) {
-    return NextResponse.json<ApiResponse<never>>(
-      { success: false, error: "Unauthorized" },
-      { status: 401 }
-    );
-  }
+  const auth = await requireAdmin();
+  if (auth instanceof NextResponse) return auth;
 
-  // TODO: Add admin role check once role-based access is implemented
-  // For now, only authenticated users can access
-  // const user = session.user as { id: string; role?: string };
-  // if (user.role !== "admin") {
-  //   return NextResponse.json<ApiResponse<never>>(
-  //     { success: false, error: "Forbidden" },
-  //     { status: 403 }
-  //   );
-  // }
+  const parsed = parseAuditLogQuery(req.nextUrl.searchParams);
+  if ("error" in parsed) return invalidQuery(parsed.error);
 
-  const searchParams = req.nextUrl.searchParams;
-  const userId = searchParams.get("userId") ?? undefined;
-  const giftId = searchParams.get("giftId") ?? undefined;
-  const eventType = searchParams.get("eventType") as AuditEventType | null;
-  const startDateStr = searchParams.get("startDate");
-  const endDateStr = searchParams.get("endDate");
-  const limitStr = searchParams.get("limit");
-  const offsetStr = searchParams.get("offset");
-
-  const startDate = startDateStr ? new Date(startDateStr) : undefined;
-  const endDate = endDateStr ? new Date(endDateStr) : undefined;
-  const limit = limitStr ? parseInt(limitStr, 10) : 50;
-  const offset = offsetStr ? parseInt(offsetStr, 10) : 0;
-
-  // Validate date parsing
-  if (startDateStr && isNaN(startDate!.getTime())) {
-    return NextResponse.json<ApiResponse<never>>(
-      { success: false, error: "Invalid startDate format" },
-      { status: 400 }
-    );
-  }
-
-  if (endDateStr && isNaN(endDate!.getTime())) {
-    return NextResponse.json<ApiResponse<never>>(
-      { success: false, error: "Invalid endDate format" },
-      { status: 400 }
-    );
-  }
-
-  const result = await queryAuditLogs({
-    userId,
-    giftId,
-    eventType: eventType ?? undefined,
-    startDate,
-    endDate,
-    limit,
-    offset,
-  });
+  const result = await queryAuditLogs(parsed.query);
 
   return NextResponse.json<ApiResponse<AuditLogQueryResponse>>({
     success: true,
