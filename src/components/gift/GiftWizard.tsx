@@ -10,6 +10,7 @@ import { TemplateSelector } from "./TemplateSelector";
 import { WizardProgress } from "./WizardProgress";
 import { GiftPreviewCard } from "./GiftPreviewCard";
 import { BLANK_TEMPLATE, type GiftTemplate } from "@/lib/giftTemplates";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import styles from "./GiftWizard.module.css";
 
 // Step indices
@@ -22,8 +23,9 @@ const STEP_REVIEW = 4;
 export function GiftWizard() {
   const [step, setStep] = useState(STEP_OCCASION);
   const [template, setTemplate] = useState<GiftTemplate>(BLANK_TEMPLATE);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const queryClient = useQueryClient();
 
   const {
     register,
@@ -36,6 +38,28 @@ export function GiftWizard() {
     resolver: zodResolver(createGiftSchema),
     defaultValues: { paymentProvider: "paystack", recipientIsRegistered: false },
     mode: "onTouched",
+  });
+
+  // useMutation so the gifts query is invalidated on success, keeping the
+  // dashboard in sync without a manual reload.
+  const createGiftMutation = useMutation({
+    mutationFn: async (data: CreateGiftFormInput) => {
+      const res = await fetch("/api/gifts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error);
+      return json;
+    },
+    onSuccess: (json) => {
+      queryClient.invalidateQueries({ queryKey: ["gifts"] });
+      window.location.href = json.data.paymentUrl;
+    },
+    onError: (err: Error) => {
+      setError(err.message);
+    },
   });
 
   function handleTemplateSelect(tpl: GiftTemplate) {
@@ -55,23 +79,9 @@ export function GiftWizard() {
     setStep((s) => Math.max(0, s - 1));
   }
 
-  const onSubmit = async (data: CreateGiftFormInput) => {
-    setLoading(true);
+  const onSubmit = (data: CreateGiftFormInput) => {
     setError(null);
-    try {
-      const res = await fetch("/api/gifts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-      });
-      const json = await res.json();
-      if (!json.success) throw new Error(json.error);
-      window.location.href = json.data.paymentUrl;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong");
-    } finally {
-      setLoading(false);
-    }
+    createGiftMutation.mutate(data);
   };
 
   return (
@@ -164,7 +174,7 @@ export function GiftWizard() {
       )}
 
       {step === STEP_REVIEW && (
-        <form onSubmit={handleSubmit(onSubmit)} noValidate>
+        <form onSubmit={handleSubmit(onSubmit as Parameters<typeof handleSubmit>[0])} noValidate>
           <h2 className={styles.stepTitle}>Review your gift</h2>
           <GiftPreviewCard
             data={getValues()}
@@ -176,7 +186,7 @@ export function GiftWizard() {
             <Button type="button" variant="secondary" onClick={back}>
               Back
             </Button>
-            <Button type="submit" loading={loading}>
+            <Button type="submit" loading={createGiftMutation.isPending}>
               Continue to Payment
             </Button>
           </div>
