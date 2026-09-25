@@ -466,3 +466,20 @@ jobs:
       - name: Cleanup
         if: always()
         run: rm -rf .bindings-check
+
+  contract-budget:
+    name: Contract Resource Budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+
+      - name: Run resource budget regression benchmarks
+        run: cargo bench --manifest-path contracts/escrow/Cargo.toml --bench escrow_bench -- --noplot
