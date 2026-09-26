@@ -1064,6 +1064,276 @@ mod property_tests {
 }
 
 
+// ─── Invariant and extended property-based tests (#82) ───────────────────────
+//
+// These tests address the three acceptance criteria from issue #82:
+//
+//   1. Funds cannot be double-claimed across arbitrary call sequences.
+//   2. Funds cannot be lost — they always end up either with the recipient
+//      (after claim) or the sender (after cancel), never stuck in the contract.
+//   3. Transfer always goes to the intended address, never to a third party.
+//
+// Each proptest! runs 1 000 cases (proptest default).
+// Failures print the seed so they are fully reproducible.
+
+#[cfg(test)]
+mod invariant_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token::{Client as TokenClient, StellarAssetClient},
+        Env,
+    };
+
+    // ── shared setup ─────────────────────────────────────────────────────────
+
+    fn setup_escrow(
+        amount: i128,
+        unlock_time: u64,
+    ) -> (Env, Address, Address, Address, TokenClient<'static>, EscrowContractClient<'static>) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let sender    = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_id  = env.register_stellar_asset_contract(sender.clone());
+        let token     = TokenClient::new(&env, &token_id);
+        StellarAssetClient::new(&env, &token_id).mint(&sender, &amount);
+
+        let contract_id = env.register_contract(None, EscrowContract);
+        let client      = EscrowContractClient::new(&env, &contract_id);
+        client.initialize(&sender, &sender, &recipient, &token_id, &amount, &unlock_time);
+
+        (env, sender, recipient, token_id, token, client)
+    }
+
+    // ── Invariant 1: no double-claim ─────────────────────────────────────────
+    // After a successful claim, every subsequent claim call must fail.
+    // Across any number of repetitions the contract balance stays 0 and the
+    // claimed flag stays true.
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1_000))]
+        #[test]
+        fn prop_no_double_claim(
+            amount      in MIN_AMOUNT..=1_000_000_000_i128,
+            unlock_time in (MIN_LOCK_DURATION + 1)..=1_000_000u64,
+            extra_calls in 1u32..=5u32,   // how many times to attempt a second claim
+        ) {
+            let (env, _sender, _recipient, _token_id, token, client) =
+                setup_escrow(amount, unlock_time);
+
+            env.ledger().with_mut(|l| l.timestamp = unlock_time);
+            client.claim();
+
+            // Contract balance must be zero
+            prop_assert_eq!(
+                token.balance(&client.address), 0,
+                "contract balance must be 0 after claim"
+            );
+
+            // Every subsequent attempt must return AlreadyClaimed
+            for _ in 0..extra_calls {
+                let err = client.try_claim().unwrap_err().unwrap();
+                prop_assert_eq!(
+                    err,
+                    EscrowError::AlreadyClaimed,
+                    "repeated claim must return AlreadyClaimed"
+                );
+                // Balance must remain 0 after failed re-claim attempts
+                prop_assert_eq!(
+                    token.balance(&client.address), 0,
+                    "contract balance must stay 0 after failed re-claim"
+                );
+            }
+        }
+    }
+
+    // ── Invariant 2: funds are never lost ─────────────────────────────────────
+    // The total supply of tokens is always conserved:
+    //   sender_balance + recipient_balance + contract_balance == initial_amount
+    // at every observable point in the escrow lifecycle.
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1_000))]
+        #[test]
+        fn prop_funds_conservation_after_claim(
+            amount      in MIN_AMOUNT..=1_000_000_000_i128,
+            unlock_time in (MIN_LOCK_DURATION + 1)..=1_000_000u64,
+        ) {
+            let (env, sender, recipient, _token_id, token, client) =
+                setup_escrow(amount, unlock_time);
+
+            // After initialize: contract holds `amount`, sender balance == 0
+            let contract_bal = token.balance(&client.address);
+            let sender_bal   = token.balance(&sender);
+            let recip_bal    = token.balance(&recipient);
+            prop_assert_eq!(
+                contract_bal + sender_bal + recip_bal,
+                amount,
+                "funds must be conserved after initialize"
+            );
+
+            // After claim: recipient holds `amount`, contract and sender == 0
+            env.ledger().with_mut(|l| l.timestamp = unlock_time);
+            client.claim();
+
+            let contract_bal = token.balance(&client.address);
+            let sender_bal   = token.balance(&sender);
+            let recip_bal    = token.balance(&recipient);
+            prop_assert_eq!(
+                contract_bal + sender_bal + recip_bal,
+                amount,
+                "funds must be conserved after claim"
+            );
+            prop_assert_eq!(
+                contract_bal, 0,
+                "contract must hold 0 after claim"
+            );
+            prop_assert_eq!(
+                recip_bal, amount,
+                "recipient must hold full amount after claim"
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1_000))]
+        #[test]
+        fn prop_funds_conservation_after_cancel(
+            amount      in MIN_AMOUNT..=1_000_000_000_i128,
+            unlock_time in (MIN_LOCK_DURATION + 1)..=1_000_000u64,
+        ) {
+            let (env, sender, recipient, _token_id, token, client) =
+                setup_escrow(amount, unlock_time);
+
+            // cancel before unlock — funds must return to sender
+            client.cancel();
+
+            let contract_bal = token.balance(&client.address);
+            let sender_bal   = token.balance(&sender);
+            let recip_bal    = token.balance(&recipient);
+            prop_assert_eq!(
+                contract_bal + sender_bal + recip_bal,
+                amount,
+                "funds must be conserved after cancel"
+            );
+            prop_assert_eq!(
+                contract_bal, 0,
+                "contract must hold 0 after cancel"
+            );
+            prop_assert_eq!(
+                recip_bal, 0,
+                "recipient must hold 0 after cancel"
+            );
+            prop_assert_eq!(
+                sender_bal, amount,
+                "sender must receive full amount back after cancel"
+            );
+        }
+    }
+
+    // ── Invariant 3: funds go to the intended address only ───────────────────
+    // A third-party address must never gain any balance as a result of a claim
+    // or cancel operation, regardless of when it is called.
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1_000))]
+        #[test]
+        fn prop_third_party_never_receives_funds_on_claim(
+            amount      in MIN_AMOUNT..=1_000_000_000_i128,
+            unlock_time in (MIN_LOCK_DURATION + 1)..=1_000_000u64,
+        ) {
+            let (env, _sender, _recipient, _token_id, token, client) =
+                setup_escrow(amount, unlock_time);
+
+            let third_party = Address::generate(&env);
+            let balance_before = token.balance(&third_party);
+
+            env.ledger().with_mut(|l| l.timestamp = unlock_time);
+            client.claim();
+
+            prop_assert_eq!(
+                token.balance(&third_party),
+                balance_before,
+                "third party balance must not change after claim"
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1_000))]
+        #[test]
+        fn prop_third_party_never_receives_funds_on_cancel(
+            amount      in MIN_AMOUNT..=1_000_000_000_i128,
+            unlock_time in (MIN_LOCK_DURATION + 1)..=1_000_000u64,
+        ) {
+            let (env, _sender, _recipient, _token_id, token, client) =
+                setup_escrow(amount, unlock_time);
+
+            let third_party = Address::generate(&env);
+            let balance_before = token.balance(&third_party);
+
+            client.cancel();
+
+            prop_assert_eq!(
+                token.balance(&third_party),
+                balance_before,
+                "third party balance must not change after cancel"
+            );
+        }
+    }
+
+    // ── Invariant 4: terminal states cannot be undone ─────────────────────────
+    // After a claim, cancel is rejected (AlreadyClaimed).
+    // After a cancel, claim is rejected (AlreadyCancelled).
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1_000))]
+        #[test]
+        fn prop_cancel_after_claim_always_fails(
+            amount      in MIN_AMOUNT..=1_000_000_000_i128,
+            unlock_time in (MIN_LOCK_DURATION + 1)..=1_000_000u64,
+        ) {
+            let (env, _sender, _recipient, _token_id, _token, client) =
+                setup_escrow(amount, unlock_time);
+
+            env.ledger().with_mut(|l| l.timestamp = unlock_time);
+            client.claim();
+
+            let err = client.try_cancel().unwrap_err().unwrap();
+            prop_assert_eq!(
+                err,
+                EscrowError::AlreadyClaimed,
+                "cancel after claim must return AlreadyClaimed"
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1_000))]
+        #[test]
+        fn prop_claim_after_cancel_always_fails(
+            amount      in MIN_AMOUNT..=1_000_000_000_i128,
+            unlock_time in (MIN_LOCK_DURATION + 1)..=1_000_000u64,
+        ) {
+            let (env, _sender, _recipient, _token_id, _token, client) =
+                setup_escrow(amount, unlock_time);
+
+            client.cancel();
+
+            env.ledger().with_mut(|l| l.timestamp = unlock_time);
+            let err = client.try_claim().unwrap_err().unwrap();
+            prop_assert_eq!(
+                err,
+                EscrowError::AlreadyCancelled,
+                "claim after cancel must return AlreadyCancelled"
+            );
+        }
+    }
+}
+
 // ─── Upgrade tests (#49) ──────────────────────────────────────────────────────
 //
 // Verifies that only the admin can upgrade the contract WASM.
