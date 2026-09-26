@@ -11,14 +11,13 @@ import { GiftPreview } from "./GiftPreview";
 import { useState } from "react";
 import { useCsrf } from "@/hooks/useCsrf";
 import { formatNGN } from "@/lib/currency";
-import { isAmbiguousDstTransition } from "@/lib/dateFormat";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import styles from "./CreateGiftForm.module.css";
 
 type Step = "form" | "preview";
 
 export function CreateGiftForm() {
   const [step, setStep] = useState<Step>("form");
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [usdcEquivalent, setUsdcEquivalent] = useState("…");
   const [showUnregisteredWarning, setShowUnregisteredWarning] = useState(false);
@@ -26,6 +25,7 @@ export function CreateGiftForm() {
   const [unlockDstWarning, setUnlockDstWarning] = useState(false);
 
   const { csrfFetch } = useCsrf();
+  const queryClient = useQueryClient();
 
   const {
     register,
@@ -37,6 +37,34 @@ export function CreateGiftForm() {
     resolver: zodResolver(createGiftSchema) as any,
     defaultValues: { paymentProvider: "paystack", recipientIsRegistered: true },
     mode: "onBlur",
+  });
+
+  // useMutation for gift creation — invalidates the gifts cache on success so
+  // the dashboard reflects the new gift without a manual reload.
+  const createGiftMutation = useMutation({
+    mutationFn: async (data: CreateGiftInput) => {
+      const res = await csrfFetch("/api/v1/gifts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...data,
+          recipientIsRegistered: recipientRegistered ?? true,
+        }),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || "Failed to create gift");
+      }
+      return res.json();
+    },
+    onSuccess: (json) => {
+      // Invalidate all pages of the gifts list so the dashboard is up-to-date.
+      queryClient.invalidateQueries({ queryKey: ["gifts"] });
+      window.location.href = json.data.paymentUrl;
+    },
+    onError: (err: Error) => {
+      setError(err.message);
+    },
   });
 
   // Step 1 → Step 2: fetch USDC estimate then show preview
@@ -97,36 +125,10 @@ export function CreateGiftForm() {
     setShowUnregisteredWarning(false);
   };
 
-  const onConfirm = async () => {
-    setLoading(true);
+  const onConfirm = () => {
     setError(null);
-    try {
-      const data = getValues();
-      const res = await csrfFetch("/api/v1/gifts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...data,
-          recipientIsRegistered: recipientRegistered ?? true,
-        }),
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json();
-        setError(errorData.error || "Failed to create gift");
-        return;
-      }
-
-      const json = await res.json();
-      const { paymentUrl } = json.data;
-
-      // Redirect to payment
-      window.location.href = paymentUrl;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "An error occurred");
-    } finally {
-      setLoading(false);
-    }
+    const data = getValues();
+    createGiftMutation.mutate(data);
   };
 
   if (step === "preview") {
@@ -136,7 +138,7 @@ export function CreateGiftForm() {
         usdcEquivalent={usdcEquivalent}
         onEdit={() => setStep("form")}
         onConfirm={onConfirm}
-        loading={loading}
+        loading={createGiftMutation.isPending}
         error={error}
       />
     );
@@ -211,8 +213,8 @@ export function CreateGiftForm() {
           <div className={styles.modal}>
             <h3>Unregistered Recipient</h3>
             <p>
-              The recipient's phone number is not registered with Lumigift. They will receive an SMS
-              invitation to claim the gift, but must register first.
+              The recipient&apos;s phone number is not registered with Lumigift. They will receive
+              an SMS invitation to claim the gift, but must register first.
             </p>
             <p>Are you sure you want to proceed?</p>
             <div className={styles.modalActions}>
