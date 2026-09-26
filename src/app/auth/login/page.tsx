@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useId, useEffect, useRef, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useId } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { signIn } from "next-auth/react";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
@@ -10,14 +10,23 @@ import styles from "./page.module.css";
 
 type Step = "phone" | "otp";
 
-/** Seconds the user must wait before they can request another OTP. */
-const RESEND_COOLDOWN_SECONDS = 60;
-
-/** Maximum OTP verification attempts before showing a lockout hint. */
-const MAX_ATTEMPTS = 5;
+/**
+ * Validates that a callbackUrl is safe (same origin, relative path only).
+ * Prevents open-redirect attacks via crafted callbackUrl query params.
+ */
+function sanitizeCallbackUrl(raw: string | null): string {
+  const fallback = "/dashboard";
+  if (!raw) return fallback;
+  // Only allow relative paths starting with a single "/"
+  if (!raw.startsWith("/")) return fallback;
+  if (raw.startsWith("//")) return fallback;
+  if (/^\/[/\\]/.test(raw)) return fallback;
+  return raw;
+}
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [step, setStep] = useState<Step>("phone");
   const [phone, setPhone] = useState("");
   const [otp, setOtp] = useState("");
@@ -55,6 +64,9 @@ export default function LoginPage() {
   const errorId = useId();
   const statusId = useId();
   const resendStatusId = useId();
+
+  // Validate the callbackUrl from the query string before use
+  const callbackUrl = sanitizeCallbackUrl(searchParams.get("callbackUrl"));
 
   const handleSendOtp = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -110,11 +122,9 @@ export default function LoginPage() {
         otp,
         redirect: false,
       });
-      if (result?.error) {
-        setAttemptCount((c) => c + 1);
-        throw new Error("Invalid OTP. Please try again.");
-      }
-      router.push("/dashboard");
+      if (result?.error) throw new Error("Invalid OTP. Please try again.");
+      // Redirect to the validated callbackUrl (or /dashboard as fallback)
+      router.push(callbackUrl);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Verification failed");
     } finally {
