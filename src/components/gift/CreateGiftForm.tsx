@@ -22,6 +22,7 @@ export function CreateGiftForm() {
   const [usdcEquivalent, setUsdcEquivalent] = useState("…");
   const [showUnregisteredWarning, setShowUnregisteredWarning] = useState(false);
   const [recipientRegistered, setRecipientRegistered] = useState<boolean | null>(null);
+  const [unlockDstWarning, setUnlockDstWarning] = useState(false);
 
   const { csrfFetch } = useCsrf();
   const queryClient = useQueryClient();
@@ -68,7 +69,10 @@ export function CreateGiftForm() {
 
   // Step 1 → Step 2: fetch USDC estimate then show preview
   const onFormSubmit = async (data: CreateGiftInput) => {
+    setLoading(true);
     setError(null);
+    // Warn if the chosen local time falls in a DST gap
+    setUnlockDstWarning(isAmbiguousDstTransition(data.unlockAt));
     try {
       // Check if recipient is registered (GET — no CSRF needed)
       const checkRes = await fetch(
@@ -79,6 +83,7 @@ export function CreateGiftForm() {
         setRecipientRegistered(checkJson.data?.exists ?? false);
         if (!checkJson.data?.exists) {
           setShowUnregisteredWarning(true);
+          setLoading(false);
           return; // Don't proceed to preview yet
         }
       } else {
@@ -96,6 +101,7 @@ export function CreateGiftForm() {
       // non-critical — preview still shows without USDC estimate
     }
     setStep("preview");
+    setLoading(false);
   };
 
   const onProceedUnregistered = async () => {
@@ -181,6 +187,12 @@ export function CreateGiftForm() {
           error={errors.unlockAt?.message}
           {...register("unlockAt")}
         />
+        {unlockDstWarning && (
+          <p role="alert" className={styles.dstWarning}>
+            ⚠️ The selected time may be ambiguous due to a daylight-saving transition in your
+            timezone. Please double-check the unlock time.
+          </p>
+        )}
 
         <Textarea
           label="Personal Message (optional)"
@@ -191,7 +203,7 @@ export function CreateGiftForm() {
           {...register("message")}
         />
 
-        <Button type="submit" fullWidth>
+        <Button type="submit" fullWidth loading={loading}>
           Preview Gift →
         </Button>
       </form>
