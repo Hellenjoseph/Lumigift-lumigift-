@@ -33,6 +33,8 @@ export enum EscrowError {
   AlreadyCancelled = 6,
   InvalidAmount = 7,
   InvalidUnlockTime = 8,
+  /** The supplied token address is not an allowed USDC contract for this network. */
+  InvalidToken = 9,
 }
 
 export class EscrowContractError extends Error {
