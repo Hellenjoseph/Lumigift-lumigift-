@@ -7,24 +7,46 @@ import { GiftCard } from "@/components/gift/GiftCard";
 import { GiftCardSkeleton } from "@/components/gift/GiftCardSkeleton";
 import styles from "./page.module.css";
 import type { ApiResponse } from "@/types";
-import type { GiftPageOffset } from "@/server/services/gift.service";
+import type { GiftPage } from "@/server/services/gift.service";
 
-const DEFAULT_LIMIT = 10;
+const PAGE_SIZE = 10;
 
-async function fetchGifts(page: number, limit: number): Promise<GiftPageOffset> {
-  const res = await fetch(`/api/v1/gifts?page=${page}&limit=${limit}`);
-  const json: ApiResponse<GiftPageOffset> = await res.json();
+async function fetchGiftsCursor(cursor: string | null, pageSize: number): Promise<GiftPage> {
+  const params = new URLSearchParams({ pageSize: String(pageSize) });
+  if (cursor) params.set("cursor", cursor);
+  const res = await fetch(`/api/v1/gifts?${params.toString()}`);
+  const json: ApiResponse<GiftPage> = await res.json();
   if (!json.success) throw new Error(json.error);
   return json.data;
 }
 
 export default function DashboardPage() {
-  const [page, setPage] = useState(1);
+  // Stack of cursors visited — index 0 is always null (first page).
+  const [cursorStack, setCursorStack] = useState<Array<string | null>>([null]);
+  const [stackIndex, setStackIndex] = useState(0);
+
+  const cursor = cursorStack[stackIndex];
+  const pageNumber = stackIndex + 1;
 
   const { data, status, isFetching, isStale, refetch } = useQuery({
-    queryKey: ["gifts", page],
-    queryFn: () => fetchGifts(page, DEFAULT_LIMIT),
+    queryKey: ["gifts", "cursor", cursor],
+    queryFn: () => fetchGiftsCursor(cursor, PAGE_SIZE),
   });
+
+  const canGoNext = Boolean(data?.nextCursor) && !isFetching;
+  const canGoPrev = stackIndex > 0 && !isFetching;
+
+  function goNext() {
+    if (!data?.nextCursor) return;
+    const newStack = [...cursorStack.slice(0, stackIndex + 1), data.nextCursor];
+    setCursorStack(newStack);
+    setStackIndex((i) => i + 1);
+  }
+
+  function goPrev() {
+    if (stackIndex === 0) return;
+    setStackIndex((i) => i - 1);
+  }
 
   // ── Loading (initial fetch) ──────────────────────────────────────────────
   if (status === "pending") {
@@ -32,9 +54,8 @@ export default function DashboardPage() {
       <div className={styles.page}>
         <div className="container">
           <h1 className={styles.title}>Your Gifts</h1>
-          {/* Accessible live region so screen readers announce loading */}
           <div className={styles.grid} aria-live="polite" aria-busy="true">
-            <GiftCardSkeleton count={DEFAULT_LIMIT} />
+            <GiftCardSkeleton count={PAGE_SIZE} />
           </div>
         </div>
       </div>
@@ -62,21 +83,21 @@ export default function DashboardPage() {
     );
   }
 
-  const { data: gifts, total, totalPages } = data!;
+  const { gifts, total, nextCursor } = data!;
 
   return (
     <div className={styles.page}>
       <div className="container">
         <h1 className={styles.title}>Your Gifts</h1>
 
-        {/* Stale banner — shown when cached data is being refreshed in background */}
+        {/* Stale/background-revalidation banner */}
         {isStale && isFetching && (
           <p className={styles.staleBanner} aria-live="polite" aria-atomic="true">
             Refreshing…
           </p>
         )}
 
-        {gifts.length === 0 ? (
+        {gifts.length === 0 && stackIndex === 0 ? (
           // ── Empty state ───────────────────────────────────────────────────
           <div className={styles.empty} role="status" aria-label="No gifts found">
             <div className={styles.emptyIconWrapper} aria-hidden="true">
@@ -108,40 +129,43 @@ export default function DashboardPage() {
         ) : (
           <>
             <p className={styles.count}>
-              Showing {(page - 1) * DEFAULT_LIMIT + 1}–{Math.min(page * DEFAULT_LIMIT, total)} of{" "}
-              {total} gifts
+              Page {pageNumber} · {total} gift{total !== 1 ? "s" : ""} total
             </p>
 
-            {/* Skeleton overlay while paginating (keeps layout stable) */}
+            {/* Skeleton replaces grid while fetching next/prev page */}
             <div className={styles.grid} aria-live="polite" aria-busy={isFetching}>
               {isFetching ? (
-                <GiftCardSkeleton count={DEFAULT_LIMIT} />
+                <GiftCardSkeleton count={PAGE_SIZE} />
               ) : (
                 gifts.map((gift) => <GiftCard key={gift.id} gift={gift} perspective="sender" />)
               )}
             </div>
 
-            <div className={styles.pagination}>
+            <nav className={styles.pagination} aria-label="Gift history pagination">
               <button
                 className="btn btn--secondary"
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page === 1 || isFetching}
+                onClick={goPrev}
+                disabled={!canGoPrev}
                 aria-label="Previous page"
+                aria-disabled={!canGoPrev}
               >
                 ← Previous
               </button>
+
               <span aria-live="polite" aria-atomic="true">
-                Page {page} of {totalPages}
+                Page {pageNumber}
               </span>
+
               <button
                 className="btn btn--secondary"
-                onClick={() => setPage((p) => p + 1)}
-                disabled={page >= totalPages || isFetching}
-                aria-label="Next page"
+                onClick={goNext}
+                disabled={!canGoNext}
+                aria-label={nextCursor ? "Next page" : "No more pages"}
+                aria-disabled={!canGoNext}
               >
                 Next →
               </button>
-            </div>
+            </nav>
           </>
         )}
       </div>
