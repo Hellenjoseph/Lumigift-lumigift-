@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { queryAuditLogs, AuditEventType } from "@/server/services/audit.service";
 import { withErrorHandler } from "@/server/middleware";
+import { requireAdmin } from "@/server/middleware/admin";
 import type { ApiResponse } from "@/types";
 
 interface AuditLogQueryResponse {
@@ -22,23 +21,8 @@ interface AuditLogQueryResponse {
 }
 
 export const GET = withErrorHandler(async (req: NextRequest) => {
-  const session = await getServerSession(authOptions);
-  if (!session?.user) {
-    return NextResponse.json<ApiResponse<never>>(
-      { success: false, error: "Unauthorized" },
-      { status: 401 }
-    );
-  }
-
-  // TODO: Add admin role check once role-based access is implemented
-  // For now, only authenticated users can access
-  // const user = session.user as { id: string; role?: string };
-  // if (user.role !== "admin") {
-  //   return NextResponse.json<ApiResponse<never>>(
-  //     { success: false, error: "Forbidden" },
-  //     { status: 403 }
-  //   );
-  // }
+  const auth = await requireAdmin();
+  if (auth instanceof NextResponse) return auth;
 
   const searchParams = req.nextUrl.searchParams;
   const userId = searchParams.get("userId") ?? undefined;
