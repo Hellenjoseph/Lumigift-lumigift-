@@ -12,6 +12,7 @@ import { TemplateSelector } from "./TemplateSelector";
 import { WizardProgress } from "./WizardProgress";
 import { GiftPreviewCard } from "./GiftPreviewCard";
 import { BLANK_TEMPLATE, type GiftTemplate } from "@/lib/giftTemplates";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import styles from "./GiftWizard.module.css";
 
 // Step indices
@@ -36,11 +37,12 @@ type MutationOutcome = "idle" | "pending" | "unknown" | "error" | "success";
 export function GiftWizard() {
   const [step, setStep] = useState(STEP_OCCASION);
   const [template, setTemplate] = useState<GiftTemplate>(BLANK_TEMPLATE);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mutationOutcome, setMutationOutcome] = useState<MutationOutcome>("idle");
 
   const { isOnline } = useNetworkStatus();
+
+  const queryClient = useQueryClient();
 
   const {
     register,
@@ -245,7 +247,7 @@ export function GiftWizard() {
       )}
 
       {step === STEP_REVIEW && (
-        <form onSubmit={handleSubmit(onSubmit)} noValidate>
+        <form onSubmit={handleSubmit(onSubmit as Parameters<typeof handleSubmit>[0])} noValidate>
           <h2 className={styles.stepTitle}>Review your gift</h2>
           <GiftPreviewCard
             data={getValues()}
