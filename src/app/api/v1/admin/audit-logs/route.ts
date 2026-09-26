@@ -38,30 +38,14 @@ export const GET = withErrorHandler(async (req: NextRequest) => {
   const limit = limitStr ? parseInt(limitStr, 10) : 50;
   const offset = offsetStr ? parseInt(offsetStr, 10) : 0;
 
-  // Validate date parsing
-  if (startDateStr && isNaN(startDate!.getTime())) {
-    return NextResponse.json<ApiResponse<never>>(
-      { success: false, error: "Invalid startDate format" },
-      { status: 400 }
-    );
-  }
+export const GET = withErrorHandler(async (req: NextRequest) => {
+  const auth = await requireAdmin();
+  if (auth instanceof NextResponse) return auth;
 
-  if (endDateStr && isNaN(endDate!.getTime())) {
-    return NextResponse.json<ApiResponse<never>>(
-      { success: false, error: "Invalid endDate format" },
-      { status: 400 }
-    );
-  }
+  const parsed = parseAuditLogQuery(req.nextUrl.searchParams);
+  if ("error" in parsed) return invalidQuery(parsed.error);
 
-  const result = await queryAuditLogs({
-    userId,
-    giftId,
-    eventType: eventType ?? undefined,
-    startDate,
-    endDate,
-    limit,
-    offset,
-  });
+  const result = await queryAuditLogs(parsed.query);
 
   return NextResponse.json<ApiResponse<AuditLogQueryResponse>>({
     success: true,
